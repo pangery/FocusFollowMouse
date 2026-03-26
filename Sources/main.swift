@@ -86,8 +86,18 @@ private final class FocusFollowController: NSObject {
     }
 
     private func isExcluded(pid: pid_t) -> Bool {
-        guard let bid = NSRunningApplication(processIdentifier: pid)?.bundleIdentifier else { return false }
-        return excludedBundleIDs.contains(bid)
+        guard let app = NSRunningApplication(processIdentifier: pid) else { return false }
+        if let bid = app.bundleIdentifier, excludedBundleIDs.contains(bid) {
+            return true
+        }
+        // Finder musí být vždy vynechán — i když bundleIdentifier chybí (výjimečně při přechodu procesu).
+        if app.bundleURL?.lastPathComponent == "Finder.app" {
+            return true
+        }
+        if app.localizedName == "Finder" {
+            return true
+        }
+        return false
     }
 
     private func mouseMovedMeaningfully() -> Bool {
