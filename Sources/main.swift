@@ -45,24 +45,93 @@ private func pid(of element: AXUIElement) -> pid_t? {
     return p
 }
 
+/// Přinese okno dopředu; celou aplikaci aktivuje jen když ještě není v popředí (méně konfliktů se systémem).
 private func activate(window: AXUIElement, pid: pid_t) {
     _ = AXUIElementPerformAction(window, kAXRaiseAction as CFString)
-    if let app = NSRunningApplication(processIdentifier: pid) {
+    guard let app = NSRunningApplication(processIdentifier: pid) else { return }
+    if NSWorkspace.shared.frontmostApplication?.processIdentifier != pid {
         app.activate(options: [.activateIgnoringOtherApps])
     }
 }
 
 private final class FocusFollowController: NSObject {
+    /// Aplikace, u kterých nechceme focus-follow (např. Finder při zavírání oken, systémové UI).
+    private let excludedBundleIDs: Set<String> = [
+        "com.apple.finder",
+        "com.apple.loginwindow",
+    ]
+
+    /// Kurzor musí zůstat nad stejným oknem tuto dobu, než přepneme focus (rychlé přejíždění okny nic nedělá).
+    private let dwellTime: TimeInterval = 0.28
+
+    /// Drahé AX dotazy jen když se myš opravdu pohnula (jinak klid = žádné volání WindowServeru).
+    private let mouseMoveThreshold: CGFloat = 2.5
+
     private let systemWide = AXUIElementCreateSystemWide()
     private var lastWindow: AXUIElement?
-    private var lastCheck: TimeInterval = 0
-    private let minInterval: TimeInterval = 0.08
+    private var pendingWindow: AXUIElement?
+    private var pendingPid: pid_t?
+    private var pendingSince: TimeInterval?
+    private var lastMouseScreen = CGPoint.zero
+    private var hasLastMouse = false
     private let ourPid = ProcessInfo.processInfo.processIdentifier
 
+    /// Okamžité vypnutí bez ukončení aplikace (např. když systém zrovna nestíhá).
+    private(set) var isPaused = false
+
+    @objc func togglePause(_ sender: NSMenuItem) {
+        isPaused.toggle()
+        sender.state = isPaused ? .on : .off
+        sender.title = isPaused ? "Zapnout focus follow" : "Pozastavit focus follow"
+    }
+
+    private func isExcluded(pid: pid_t) -> Bool {
+        guard let bid = NSRunningApplication(processIdentifier: pid)?.bundleIdentifier else { return false }
+        return excludedBundleIDs.contains(bid)
+    }
+
+    private func mouseMovedMeaningfully() -> Bool {
+        let p = NSEvent.mouseLocation
+        guard hasLastMouse else {
+            lastMouseScreen = p
+            hasLastMouse = true
+            return true
+        }
+        let dx = p.x - lastMouseScreen.x
+        let dy = p.y - lastMouseScreen.y
+        let moved = (dx * dx + dy * dy) >= mouseMoveThreshold * mouseMoveThreshold
+        lastMouseScreen = p
+        return moved
+    }
+
+    /// Dokončení dwell bez opakovaného AX — při stojící myši nezatěžujeme systém.
+    private func tryCompletePendingDwell(now: TimeInterval) {
+        guard let w = pendingWindow,
+              let p = pendingPid,
+              let since = pendingSince,
+              now - since >= dwellTime
+        else { return }
+        guard p != ourPid, !isExcluded(pid: p) else {
+            pendingWindow = nil
+            pendingPid = nil
+            pendingSince = nil
+            return
+        }
+        lastWindow = w
+        pendingWindow = nil
+        pendingPid = nil
+        pendingSince = nil
+        activate(window: w, pid: p)
+    }
+
     func tick() {
+        guard !isPaused else { return }
         let now = ProcessInfo.processInfo.systemUptime
-        guard now - lastCheck >= minInterval else { return }
-        lastCheck = now
+
+        if !mouseMovedMeaningfully() {
+            tryCompletePendingDwell(now: now)
+            return
+        }
 
         let pt = mouseLocationForAccessibility()
         var el: AXUIElement?
@@ -73,12 +142,34 @@ private final class FocusFollowController: NSObject {
               let targetPid = pid(of: window), targetPid != ourPid
         else { return }
 
-        if let lw = lastWindow, CFEqual(lw as CFTypeRef, window as CFTypeRef) {
+        if isExcluded(pid: targetPid) {
+            lastWindow = nil
+            pendingWindow = nil
+            pendingPid = nil
+            pendingSince = nil
             return
         }
 
-        lastWindow = window
-        activate(window: window, pid: targetPid)
+        if let lw = lastWindow, CFEqual(lw as CFTypeRef, window as CFTypeRef) {
+            pendingWindow = nil
+            pendingPid = nil
+            pendingSince = nil
+            return
+        }
+
+        if let pw = pendingWindow, CFEqual(pw as CFTypeRef, window as CFTypeRef) {
+            guard let since = pendingSince, now - since >= dwellTime else { return }
+            lastWindow = window
+            pendingWindow = nil
+            pendingPid = nil
+            pendingSince = nil
+            activate(window: window, pid: targetPid)
+            return
+        }
+
+        pendingWindow = window
+        pendingPid = targetPid
+        pendingSince = now
     }
 }
 
@@ -94,6 +185,14 @@ autoreleasepool {
     }
 
     let menu = NSMenu()
+    let pauseItem = NSMenuItem(
+        title: "Pozastavit focus follow",
+        action: #selector(FocusFollowController.togglePause(_:)),
+        keyEquivalent: ""
+    )
+    pauseItem.target = controller
+    menu.addItem(pauseItem)
+    menu.addItem(.separator())
     let quitItem = NSMenuItem(
         title: "Ukončit Focus Follow Mouse",
         action: #selector(NSApplication.terminate(_:)),
@@ -103,7 +202,8 @@ autoreleasepool {
     menu.addItem(quitItem)
     statusItem.menu = menu
 
-    Timer.scheduledTimer(withTimeInterval: 1.0 / 60.0, repeats: true) { _ in
+    // 8× za sekundu stačí pro dwell; 60 Hz + AX by zbytečně dusilo WindowServer.
+    Timer.scheduledTimer(withTimeInterval: 0.125, repeats: true) { _ in
         controller.tick()
     }
 
