@@ -2,6 +2,19 @@
 
 Přepíná aktivní okno při přejetí kurzorem (bez nutnosti klikat).
 
+## Stažení projektu přes terminál
+
+Potřebuješ [Git](https://git-scm.com/). V terminálu:
+
+```bash
+git clone https://github.com/pangery/FocusFollowMouse.git
+cd FocusFollowMouse
+```
+
+Pak pokračuj sestavením (sekce níže).
+
+**Bez Gitu:** na stránce repozitáře na GitHubu tlačítko **Code → Download ZIP**, rozbal složku a v terminálu do ní přejdi (`cd` na rozbalenou cestu).
+
 ## Sestavení
 
 ```bash
